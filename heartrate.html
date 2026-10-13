@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Heart Rate Display</title>
+<style>
+  :root { --bg:#111; --fg:#fff; --zone:#555; }
+  * { box-sizing:border-box; margin:0; }
+  html,body { height:100%; background:var(--bg); color:var(--fg); font-family:system-ui,sans-serif; overflow:hidden; }
+  body { display:flex; flex-direction:column; padding:env(safe-area-inset-top) 12px env(safe-area-inset-bottom); }
+  #top { display:flex; justify-content:space-between; align-items:center; padding:8px 0; font-size:14px; opacity:.8; }
+  #bpmWrap { flex:0 0 auto; text-align:center; border-radius:20px; background:var(--zone); transition:background .4s; padding:10px 0 4px; }
+  #bpm { font-size:min(34vh,40vw); font-weight:800; line-height:1; font-variant-numeric:tabular-nums; }
+  #zoneName { font-size:20px; letter-spacing:.1em; text-transform:uppercase; opacity:.9; padding-bottom:6px; }
+  canvas { flex:1 1 auto; width:100%; min-height:0; margin:10px 0; background:#1b1b1b; border-radius:12px; }
+  #stats { display:flex; justify-content:space-around; font-size:16px; padding-bottom:8px; }
+  #stats b { font-size:22px; display:block; text-align:center; }
+  #controls { display:flex; gap:8px; flex-wrap:wrap; padding-bottom:10px; }
+  button, input { font-size:16px; padding:12px 14px; border-radius:10px; border:0; background:#333; color:#fff; }
+  button.primary { background:#2a7de1; flex:1; }
+  input { width:90px; }
+  label { display:flex; align-items:center; gap:6px; font-size:14px; }
+  #msg { font-size:13px; opacity:.7; text-align:center; padding-bottom:6px; min-height:18px; }
+</style>
+</head>
+<body>
+  <div id="top"><span id="status">Not connected</span><span id="clock">0:00</span></div>
+  <div id="bpmWrap"><div id="bpm">--</div><div id="zoneName">&nbsp;</div></div>
+  <canvas id="chart"></canvas>
+  <div id="stats">
+    <div>Avg<b id="avg">--</b></div>
+    <div>Max<b id="max">--</b></div>
+    <div>Min<b id="min">--</b></div>
+  </div>
+  <div id="msg"></div>
+  <div id="controls">
+    <button class="primary" id="connect">Connect strap</button>
+    <button id="demo">Demo</button>
+    <button id="reset">Reset</button>
+    <button id="csv">CSV</button>
+    <label>Max HR <input id="maxhr" type="number" value="190" min="120" max="230" inputmode="numeric"></label>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+let samples = [];            // {t: ms since start, bpm}
+let startTime = null;
+let demoTimer = null, device = null, wakeLock = null;
+const WINDOW_MS = 10 * 60 * 1000; // graph shows last 10 minutes
+
+const ZONES = [
+  {name:'Rest',     min:0,   color:'#555'},
+  {name:'Easy',     min:.5,  color:'#3b82f6'},
+  {name:'Fat burn', min:.6,  color:'#22a559'},
+  {name:'Cardio',   min:.7,  color:'#e0a800'},
+  {name:'Hard',     min:.8,  color:'#e8731a'},
+  {name:'Max',      min:.9,  color:'#d62839'},
+];
+function zoneFor(bpm){
+  const pct = bpm / (+$('maxhr').value || 190);
+  let z = ZONES[0];
+  for (const c of ZONES) if (pct >= c.min) z = c;
+  return z;
+}
+
+function addSample(bpm){
+  if (!bpm) return;
+  if (startTime === null) startTime = Date.now();
+  samples.push({t: Date.now() - startTime, bpm});
+  const z = zoneFor(bpm);
+  $('bpm').textContent = bpm;
+  $('zoneName').textContent = z.name;
+  document.documentElement.style.setProperty('--zone', z.color);
+  const vals = samples.map(s => s.bpm);
+  $('avg').textContent = Math.round(vals.reduce((a,b)=>a+b,0)/vals.length);
+  $('max').textContent = Math.max(...vals);
+  $('min').textContent = Math.min(...vals);
+  draw();
+}
+
+function draw(){
+  const c = $('chart'), dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== w*dpr || c.height !== h*dpr){ c.width = w*dpr; c.height = h*dpr; }
+  const g = c.getContext('2d');
+  g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,w,h);
+  if (!samples.length) return;
+  const last = samples[samples.length-1].t;
+  const t1 = Math.max(last, 60000), t0 = Math.max(0, t1 - WINDOW_MS);
+  const vis = samples.filter(s => s.t >= t0);
+  const vals = vis.map(s => s.bpm);
+  const lo = Math.floor((Math.min(...vals) - 5)/10)*10, hi = Math.ceil((Math.max(...vals) + 5)/10)*10;
+  const padL = 34, padB = 18, pw = w - padL - 6, ph = h - padB - 6;
+  const X = t => padL + (t - t0) / (t1 - t0) * pw;
+  const Y = v => 6 + ph - (v - lo) / (hi - lo) * ph;
+  // zone bands
+  const mh = +$('maxhr').value || 190;
+  ZONES.forEach((z,i) => {
+    const a = z.min*mh, b = (ZONES[i+1] ? ZONES[i+1].min*mh : 999);
+    const top = Math.min(b, hi), bot = Math.max(a, lo);
+    if (top > bot){ g.fillStyle = z.color + '33'; g.fillRect(padL, Y(top), pw, Y(bot)-Y(top)); }
+  });
+  // axes labels
+  g.fillStyle = '#999'; g.font = '11px system-ui';
+  for (let v = lo; v <= hi; v += 10){ g.fillText(v, 2, Y(v)+4); }
+  const mins = Math.round((t1 - t0)/60000);
+  g.fillText(`${mins} min window`, w - 90, h - 4);
+  // line
+  g.strokeStyle = '#fff'; g.lineWidth = 2.5; g.lineJoin = 'round'; g.beginPath();
+  vis.forEach((s,i) => { const x = X(s.t), y = Y(s.bpm); i ? g.lineTo(x,y) : g.moveTo(x,y); });
+  g.stroke();
+}
+
+function parseHR(dv){
+  const flags = dv.getUint8(0);
+  return (flags & 1) ? dv.getUint16(1, true) : dv.getUint8(1);
+}
+
+async function keepAwake(){
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && (device || demoTimer)) keepAwake(); });
+
+async function connect(){
+  if (!navigator.bluetooth){
+    $('msg').textContent = 'Web Bluetooth not supported here. Use Chrome on Android, or the Bluefy browser on iPhone. Must be served over https.';
+    return;
+  }
+  try {
+    stopDemo();
+    device = await navigator.bluetooth.requestDevice({ filters:[{services:['heart_rate']}] });
+    device.addEventListener('gattserverdisconnected', () => {
+      $('status').textContent = 'Disconnected, reconnecting...';
+      setTimeout(reconnect, 1500);
+    });
+    await startNotifications();
+  } catch(e){ $('msg').textContent = e.message; }
+}
+async function startNotifications(){
+  const server = await device.gatt.connect();
+  const svc = await server.getPrimaryService('heart_rate');
+  const ch = await svc.getCharacteristic('heart_rate_measurement');
+  ch.addEventListener('characteristicvaluechanged', e => addSample(parseHR(e.target.value)));
+  await ch.startNotifications();
+  $('status').textContent = 'Connected: ' + (device.name || 'strap');
+  $('msg').textContent = '';
+  keepAwake();
+}
+async function reconnect(){
+  if (!device) return;
+  try { await startNotifications(); } catch(e){ setTimeout(reconnect, 3000); }
+}
+
+function startDemo(){
+  if (demoTimer){ stopDemo(); return; }
+  if (device && device.gatt.connected) device.gatt.disconnect();
+  device = null;
+  let hr = 95, phase = 0;
+  $('status').textContent = 'Demo mode (simulated)';
+  keepAwake();
+  demoTimer = setInterval(() => {
+    phase += 0.03;
+    const target = 140 + 35*Math.sin(phase);
+    hr += (target - hr)*0.15 + (Math.random()-0.5)*3;
+    addSample(Math.round(hr));
+  }, 1000);
+}
+function stopDemo(){ if (demoTimer){ clearInterval(demoTimer); demoTimer = null; $('status').textContent = 'Not connected'; } }
+
+function reset(){
+  samples = []; startTime = null;
+  ['bpm','avg','max','min'].forEach(i => $(i).textContent = '--');
+  $('zoneName').innerHTML = '&nbsp;'; $('clock').textContent = '0:00';
+  draw();
+}
+function exportCSV(){
+  if (!samples.length) return;
+  const rows = ['seconds,bpm', ...samples.map(s => (s.t/1000).toFixed(0)+','+s.bpm)].join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([rows], {type:'text/csv'}));
+  a.download = 'workout-' + new Date().toISOString().slice(0,16).replace(':','-') + '.csv';
+  a.click();
+}
+
+setInterval(() => {
+  if (startTime === null) return;
+  const s = Math.floor((Date.now() - startTime)/1000);
+  $('clock').textContent = Math.floor(s/60) + ':' + String(s%60).padStart(2,'0');
+}, 1000);
+
+$('connect').onclick = connect;
+$('demo').onclick = startDemo;
+$('reset').onclick = reset;
+$('csv').onclick = exportCSV;
+$('maxhr').onchange = draw;
+window.addEventListener('resize', draw);
+draw();
+</script>
+</body>
+</html>
